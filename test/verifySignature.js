@@ -2,100 +2,126 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
 describe("VerifyInteraction Contract", function () {
-  let VerifyInteraction, verifyInteraction;
-  let owner, user;
-  let serviceId;
-
-  beforeEach(async function () {
-    [owner, user] = await ethers.getSigners(2);
-
-    // Deploy the contract
-    VerifyInteraction = await ethers.getContractFactory("VerifyInteraction");
-    verifyInteraction = await VerifyInteraction.deploy();
-    await verifyInteraction.deployed();
-  });
-
-  describe("Service Registration", function () {
-    it("Should register a new service", async function () {
-      const metadata = "Service Metadata";
-      const tx = await verifyInteraction.connect(owner).registerService(metadata);
-      const receipt = await tx.wait();
-
-      // Extract service ID from emitted event
-      const event = receipt.events.find((e) => e.event === "ServiceRegistered");
-      serviceId = event.args.serviceId.toNumber();
-        // serviceId = 1;
-      // Verify service ownership and metadata
-      const services = await verifyInteraction.getServicesByOwner(owner.address);
-      expect(services.length).to.equal(1);
-      expect(services[0].serviceId).to.equal(serviceId);
-      expect(services[0].metadata).to.equal(metadata);
-    });
-  });
-
-  describe("Interaction Registration", function () {
-    beforeEach(async function () {
-      // Register a service
-      const metadata = "Service Metadata";
-      const tx = await verifyInteraction.connect(owner).registerService(metadata);
-      const receipt = await tx.wait();
-      serviceId = receipt.events[0].args.serviceId.toNumber();
+    let VerifyInteraction, verifyInteraction, owner, user1, user2;
+    
+    beforeEach(async () => {
+        [owner, user1, user2] = await ethers.getSigners();
+        VerifyInteraction = await ethers.getContractFactory("VerifyInteraction");
+        verifyInteraction = await VerifyInteraction.deploy();
+        await verifyInteraction.deployed();
     });
 
-    it("Should register an interaction with a valid signature", async function () {
-      // Prepare message and signature
-      const messageHash = await verifyInteraction.getMessageHash(user.address, serviceId, "Record Interaction");
-      const signature = await user.signMessage(ethers.utils.arrayify(messageHash));
-
-      // Register interaction
-      await expect(
-        verifyInteraction.connect(owner).registerInteraction(user.address, serviceId, signature)
-      ).to.not.be.reverted;
-
+    it("should register a service successfully", async function () {
+        const tx = await verifyInteraction.connect(owner).registerService("Service Metadata");
+        const receipt = await tx.wait();
+        const event = receipt.events.find(event => event.event === "ServiceRegistered");
+        
+        expect(event.args.owner).to.equal(owner.address);
+        expect(event.args.serviceId).to.equal(1);
     });
 
-    it("Should reject interaction with an invalid signature", async function () {
-      const fakeSignature = "0x" + "1".repeat(130); // Invalid signature
-      await expect(
-        verifyInteraction.connect(owner).registerInteraction(user.address, serviceId, fakeSignature)
-      ).to.be.revertedWith("Invalid signature");
-    });
-  });
+    it("should register an interaction with a valid signature", async function () {
+        const serviceId = await registerService(owner, "Test Service");
 
-  describe("Feedback Verification and Submission", function () {
-    beforeEach(async function () {
-      // Register a service
-      const metadata = "Service Metadata";
-      const tx = await verifyInteraction.connect(owner).registerService(metadata);
-      const receipt = await tx.wait();
-      serviceId = receipt.events[0].args.serviceId.toNumber();
+        const message = ethers.utils.solidityKeccak256(
+            ["address", "uint256", "string"],
+            [user1.address, serviceId, "Record Interaction"]
+        );
+        const signature = await signMessage(user1, message);
+        
+        await expect(
+            verifyInteraction.connect(owner).registerInteraction(user1.address, serviceId, signature)
+        ).to.not.be.reverted;
 
-      // Register an interaction
-      const message = await verifyInteraction.getMessageHash(user.address, serviceId, "Record Interaction");
-      const signature = await user.signMessage(ethers.utils.arrayify(message));
-      await verifyInteraction.connect(owner).registerInteraction(user.address, serviceId, signature);
+        const totalInteractions = await verifyInteraction.getTotalInteractions(serviceId);
+        expect(totalInteractions).to.equal(1);
     });
 
-    it("Should verify feedback filling with correct signature", async function () {
-      const feedbackMessage = await verifyInteraction.getMessageHash(user.address, serviceId, "Feedback Filling");
-      const feedbackSignature = await user.signMessage(ethers.utils.arrayify(feedbackMessage));
+    it("should fail to register interaction with an invalid signature", async function () {
+        const serviceId = await registerService(owner, "Test Service");
 
-      const isVerified = await verifyInteraction.verifyFeedbackFilling(user.address, serviceId, feedbackSignature);
-      expect(isVerified).to.be.true;
+        const fakeMessage = ethers.utils.solidityKeccak256(
+            ["address", "uint256", "string"],
+            [user2.address, serviceId, "Record Interaction"]
+        );
+        const fakeSignature = await signMessage(user1, fakeMessage);
+        
+        await expect(
+            verifyInteraction.connect(owner).registerInteraction(user1.address, serviceId, fakeSignature)
+        ).to.be.revertedWith("Invalid signature");
     });
 
-    it("Should allow feedback submission after verification", async function () {
-      const feedbackMessage = await verifyInteraction.getMessageHash(user.address, serviceId, "Feedback Filling");
-      const feedbackSignature = await user.signMessage(ethers.utils.arrayify(feedbackMessage));
+    it("should submit feedback after a verified interaction", async function () {
+        const serviceId = await registerService(owner, "Test Service");
 
-      const feedback = "Great service!";
-      await verifyInteraction
-        .connect(owner)
-        .submitFeedback(user.address, serviceId, feedbackSignature, feedback);
+        const interactionMessage = ethers.utils.solidityKeccak256(
+            ["address", "uint256", "string"],
+            [user1.address, serviceId, "Record Interaction"]
+        );
+        const interactionSignature = await signMessage(user1, interactionMessage);
+        await verifyInteraction.connect(owner).registerInteraction(user1.address, serviceId, interactionSignature);
 
-      const feedbacks = await verifyInteraction.getFeedbackByService(serviceId);
-      expect(feedbacks.length).to.equal(1);
-      expect(feedbacks[0]).to.equal(feedback);
+        const feedbackMessage = ethers.utils.solidityKeccak256(
+            ["address", "uint256", "string"],
+            [user1.address, serviceId, "Feedback Filling"]
+        );
+        const feedbackSignature = await signMessage(user1, feedbackMessage);
+
+        await expect(
+            verifyInteraction.connect(owner).submitFeedback(user1.address, serviceId, feedbackSignature, "Great service!")
+        ).to.not.be.reverted;
+
+        const feedbackCount = await verifyInteraction.getTotalFeedbacks(serviceId);
+        expect(feedbackCount).to.equal(1);
     });
-  });
+
+    it("should not allow feedback without verified interaction", async function () {
+        const serviceId = await registerService(owner, "Test Service");
+
+        const feedbackMessage = ethers.utils.solidityKeccak256(
+            ["address", "uint256", "string"],
+            [user1.address, serviceId, "Feedback Filling"]
+        );
+        const feedbackSignature = await signMessage(user1, feedbackMessage);
+
+        await expect(
+            verifyInteraction.connect(owner).submitFeedback(user1.address, serviceId, feedbackSignature, "Great service!")
+        ).to.be.revertedWith("Invalid state");
+    });
+
+    it("should reward users who submitted feedback", async function () {
+        const serviceId = await registerService(owner, "Reward Service");
+
+        const interactionMessage = ethers.utils.solidityKeccak256(
+            ["address", "uint256", "string"],
+            [user1.address, serviceId, "Record Interaction"]
+        );
+        const interactionSignature = await signMessage(user1, interactionMessage);
+        await verifyInteraction.connect(owner).registerInteraction(user1.address, serviceId, interactionSignature);
+
+        const feedbackMessage = ethers.utils.solidityKeccak256(
+            ["address", "uint256", "string"],
+            [user1.address, serviceId, "Feedback Filling"]
+        );
+        const feedbackSignature = await signMessage(user1, feedbackMessage);
+        await verifyInteraction.connect(owner).submitFeedback(user1.address, serviceId, feedbackSignature, "Useful feedback");
+
+        const rewardAmount = ethers.utils.parseEther("0.1");
+
+        await expect(
+            await verifyInteraction.connect(owner).rewardUsersForFeedback(serviceId, rewardAmount, { value: rewardAmount })
+        ).to.changeEtherBalance(user1, rewardAmount);
+    });
+
+    async function registerService(account, metadata) {
+        const tx = await verifyInteraction.connect(account).registerService(metadata);
+        const receipt = await tx.wait();
+        const event = receipt.events.find(event => event.event === "ServiceRegistered");
+        return event.args.serviceId;
+    }
+
+    async function signMessage(signer, messageHash) {
+        const messageArray = ethers.utils.arrayify(messageHash);
+        return await signer.signMessage(messageArray);
+    }
 });

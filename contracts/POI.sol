@@ -21,8 +21,10 @@ contract VerifyInteraction {
     mapping(address => Service[]) public ownerToServices;
     mapping(uint256 => address) public serviceIdToOwner;
     mapping(uint256 => string[]) private serviceToFeedback;
+    mapping(uint256 => address[]) private serviceToFeedbackUsers; // Track users who gave feedback
     mapping(bytes32 => InteractionState) private interactionToState;
     mapping(bytes32 => Signature) private interactionToSignature;
+    mapping(uint256 => uint256) private serviceToTotalInteractions;
 
     event ServiceRegistered(address indexed owner, uint256 serviceId);
 
@@ -52,6 +54,8 @@ contract VerifyInteraction {
             getEthSignedMessageHash(getMessageHash(_user, _serviceId, "Record Interaction")),
             _signature
         );
+
+        serviceToTotalInteractions[_serviceId]++;
     }
 
     function verifyFeedbackFilling(
@@ -80,6 +84,27 @@ contract VerifyInteraction {
         bytes32 interactionId = keccak256(abi.encodePacked(_user, _serviceId));
         interactionToState[interactionId] = InteractionState.FEEDBACK_GIVEN;
         serviceToFeedback[_serviceId].push(_feedback);
+        serviceToFeedbackUsers[_serviceId].push(_user);
+    }
+
+    // Get total interactions for a service
+    function getTotalInteractions(uint256 _serviceId) public view returns (uint256) {
+        return serviceToTotalInteractions[_serviceId];
+    }
+
+    // Get total feedbacks for a service
+    function getTotalFeedbacks(uint256 _serviceId) public view returns (uint256) {
+        return serviceToFeedback[_serviceId].length;
+    }
+
+    // Reward users who have submitted feedback for a specific service
+    function rewardUsersForFeedback(uint256 _serviceId, uint256 _rewardAmount) public payable {
+        require(msg.value >= _rewardAmount * serviceToFeedbackUsers[_serviceId].length, "Insufficient funds");
+
+        for (uint256 i = 0; i < serviceToFeedbackUsers[_serviceId].length; i++) {
+            address user = serviceToFeedbackUsers[_serviceId][i];
+            payable(user).transfer(_rewardAmount);
+        }
     }
 
     function getServicesByOwner(address _owner) public view returns (Service[] memory) {
