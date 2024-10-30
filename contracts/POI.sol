@@ -7,23 +7,27 @@ contract VerifyInteraction {
         string metadata;
     }
 
+    struct Feedback {
+        address user;
+        string content;
+    }
+
     enum InteractionState {
         UNINITIALISED,
         RECORDED,
         FEEDBACK_GIVEN
     }
 
-    struct Signature {
+    struct InteractionData {
+        InteractionState state;
         bytes32 ethSignedHash;
-        bytes sign;
+        bytes signature;
     }
 
     mapping(address => Service[]) public ownerToServices;
     mapping(uint256 => address) public serviceIdToOwner;
-    mapping(uint256 => string[]) private serviceToFeedback;
-    mapping(uint256 => address[]) private serviceToFeedbackUsers; // Track users who gave feedback
-    mapping(bytes32 => InteractionState) private interactionToState;
-    mapping(bytes32 => Signature) private interactionToSignature;
+    mapping(uint256 => Feedback[]) private serviceToFeedback;  // Feedback data combined in one mapping
+    mapping(bytes32 => InteractionData) private interactionData;
     mapping(uint256 => uint256) private serviceToTotalInteractions;
 
     event ServiceRegistered(address indexed owner, uint256 serviceId);
@@ -47,10 +51,10 @@ contract VerifyInteraction {
         require(verify(_user, _serviceId, "Record Interaction", _signature), "Invalid signature");
 
         bytes32 interactionId = keccak256(abi.encodePacked(_user, _serviceId));
-        require(interactionToState[interactionId] == InteractionState.UNINITIALISED, "Invalid state");
+        require(interactionData[interactionId].state == InteractionState.UNINITIALISED, "Invalid state");
 
-        interactionToState[interactionId] = InteractionState.RECORDED;
-        interactionToSignature[interactionId] = Signature(
+        interactionData[interactionId] = InteractionData(
+            InteractionState.RECORDED,
             getEthSignedMessageHash(getMessageHash(_user, _serviceId, "Record Interaction")),
             _signature
         );
@@ -66,11 +70,9 @@ contract VerifyInteraction {
         require(verify(_user, _serviceId, "Feedback Filling", _feedbackFillingSignature), "Feedback filling signature not verified");
 
         bytes32 interactionId = keccak256(abi.encodePacked(_user, _serviceId));
-        require(interactionToState[interactionId] == InteractionState.RECORDED, "Invalid state");
+        require(interactionData[interactionId].state == InteractionState.RECORDED, "Invalid state");
 
-        Signature memory prevSign = interactionToSignature[interactionId];
-        address prevUser = recoverSigner(prevSign.ethSignedHash, prevSign.sign);
-        return (_user == prevUser);
+        return (recoverSigner(interactionData[interactionId].ethSignedHash, interactionData[interactionId].signature) == _user);
     }
 
     function submitFeedback(
@@ -82,9 +84,8 @@ contract VerifyInteraction {
         require(verifyFeedbackFilling(_user, _serviceId, _feedbackFillingSignature), "User signature not verified");
 
         bytes32 interactionId = keccak256(abi.encodePacked(_user, _serviceId));
-        interactionToState[interactionId] = InteractionState.FEEDBACK_GIVEN;
-        serviceToFeedback[_serviceId].push(_feedback);
-        serviceToFeedbackUsers[_serviceId].push(_user);
+        interactionData[interactionId].state = InteractionState.FEEDBACK_GIVEN;
+        serviceToFeedback[_serviceId].push(Feedback(_user, _feedback));
     }
 
     // Get total interactions for a service
@@ -99,10 +100,10 @@ contract VerifyInteraction {
 
     // Reward users who have submitted feedback for a specific service
     function rewardUsersForFeedback(uint256 _serviceId, uint256 _rewardAmount) public payable {
-        require(msg.value >= _rewardAmount * serviceToFeedbackUsers[_serviceId].length, "Insufficient funds");
+        require(msg.value >= _rewardAmount * serviceToFeedback[_serviceId].length, "Insufficient funds");
 
-        for (uint256 i = 0; i < serviceToFeedbackUsers[_serviceId].length; i++) {
-            address user = serviceToFeedbackUsers[_serviceId][i];
+        for (uint256 i = 0; i < serviceToFeedback[_serviceId].length; i++) {
+            address user = serviceToFeedback[_serviceId][i].user;
             payable(user).transfer(_rewardAmount);
         }
     }
@@ -112,7 +113,13 @@ contract VerifyInteraction {
     }
 
     function getFeedbackByService(uint256 _serviceId) public view returns (string[] memory) {
-        return serviceToFeedback[_serviceId];
+        uint totalFeedbacks = serviceToFeedback[_serviceId].length;
+
+        string[] memory feedbacks = new string[](totalFeedbacks);
+        for (uint256 i = 0; i < totalFeedbacks; i++) {
+            feedbacks[i] = serviceToFeedback[_serviceId][i].content;
+        }
+        return feedbacks;
     }
 
     function getMessageHash(
