@@ -30,6 +30,7 @@
     "solidity-coverage": "^0.8.2"
   },
   "dependencies": {
-    "@oasisprotocol/sapphire-hardhat": "^2.19.4"
+    "@oasisprotocol/sapphire-hardhat": "^2.19.4",
+    "dotenv": "^16.4.5"
   }
 }

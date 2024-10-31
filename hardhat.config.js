@@ -6,6 +6,8 @@ require('@oasisprotocol/sapphire-hardhat');
 // testing the frontend.
 require("./tasks/faucet");
 
+require('dotenv').config();
+
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: "0.8.17",
@@ -15,6 +17,14 @@ module.exports = {
       url: "https://testnet.sapphire.oasis.io",
       accounts: process.env.PRIVATE_KEY
         ? [process.env.PRIVATE_KEY]
+        : [],
+      chainId: 0x5aff,
+    },
+    'sapphire-localnet': {
+      // This is Testnet! If you want Mainnet, add a new network config item.
+      url: "http://localhost:8545",
+      accounts: process.env.LOCALNET_PRIVATE_KEY
+        ? [process.env.LOCALNET_PRIVATE_KEY]
         : [],
       chainId: 0x5aff,
     },

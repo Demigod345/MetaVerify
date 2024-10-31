@@ -2,172 +2,176 @@
 pragma solidity ^0.8.0;
 
 contract PrivateFeedback {
-    // Service details
-    mapping(uint256 => string) private serviceMetadata;
-    mapping(uint256 => address) public serviceIdToOwner;
-    mapping(address => uint256[]) private ownerToServiceIds;
+    struct Service {
+        uint256 metadata_p1;
+        uint256 metadata_p2;
+        address owner;
+    }
 
-    // Interaction details
-    mapping(bytes32 => uint8) private interactionState; // 0 = UNINITIALISED, 1 = RECORDED, 2 = FEEDBACK_GIVEN
-    mapping(bytes32 => bytes32) private interactionEthSignedHash;
-    mapping(bytes32 => bytes) private interactionSignature;
-    mapping(bytes32 => string) private interactionToFeedback;
+    struct Interaction {
+        uint8 state; // 0 = UNINITIALISED, 1 = RECORDED, 2 = FEEDBACK_GIVEN
+        address user;
+    }
 
-    mapping(uint256 => bytes32[]) private serviceToInteractions;
-
-    event ServiceRegistered(address indexed owner, uint256 serviceId);
+    mapping(uint256 => Service) private services;
+    mapping(uint256 => bytes32[]) private serviceInteractions;
+    mapping(bytes32 => Interaction) private interactions;
+    mapping(bytes32 => uint256[2]) private feedback;
 
     uint256 private serviceIdCounter = 1;
 
-    function registerService(string memory _metadata) public returns (uint256) {
+    event ServiceRegistered(address indexed owner, uint256 serviceId);
+
+    // Register a new service and assign an ID to it.
+    function registerService(uint256 _metadata_p1, uint256 _metadata_p2) external returns (uint256) {
         uint256 currentServiceId = serviceIdCounter++;
-        serviceIdToOwner[currentServiceId] = msg.sender;
-        serviceMetadata[currentServiceId] = _metadata;
-        ownerToServiceIds[msg.sender].push(currentServiceId);
+        services[currentServiceId] = Service({
+            metadata_p1: _metadata_p1,
+            metadata_p2: _metadata_p2,
+            owner: msg.sender
+        });
+
         emit ServiceRegistered(msg.sender, currentServiceId);
         return currentServiceId;
     }
 
+    // Register an interaction for a specific service.
     function registerInteraction(
-        address _user,
         uint256 _serviceId,
-        bytes memory _signature
-    ) public {
-        require(serviceIdToOwner[_serviceId] != address(0), "Service not registered");
-        require(verify(_user, _serviceId, "Record Interaction", _signature), "Invalid signature");
+        uint8 _v,
+        bytes32 _r,
+        bytes32 _s
+    ) external {
+        require(services[_serviceId].owner != address(0), "Service not registered");
 
-        bytes32 interactionId = keccak256(abi.encodePacked(_user, _serviceId));
-        require(interactionState[interactionId] == 0, "Invalid state");
+        address user = msg.sender;
+        bytes32 interactionId = _getInteractionId(user, _serviceId);
+        require(interactions[interactionId].state == 0, "Invalid state");
 
-        interactionState[interactionId] = 1;
-        interactionEthSignedHash[interactionId] = getEthSignedMessageHash(getMessageHash(_user, _serviceId, "Record Interaction"));
-        interactionSignature[interactionId] = _signature;
-        serviceToInteractions[_serviceId].push(interactionId);
+        bytes32 messageHash = _getMessageHash(user, _serviceId, "Record Interaction");
+        bytes32 ethSignedMessageHash = _getEthSignedMessageHash(messageHash);
+        require(_recoverSigner(ethSignedMessageHash, _v, _r, _s) == user, "Invalid Signature");
+
+        interactions[interactionId] = Interaction(1, user);
+        serviceInteractions[_serviceId].push(interactionId);
     }
 
+    // Verify that feedback filling can occur.
     function verifyFeedbackFilling(
         address _user,
         uint256 _serviceId,
         bytes memory _feedbackFillingSignature
     ) public view returns (bool) {
-        require(verify(_user, _serviceId, "Feedback Filling", _feedbackFillingSignature), "Feedback filling signature not verified");
+        bytes32 interactionId = _getInteractionId(_user, _serviceId);
+        require(interactions[interactionId].state == 1, "Invalid state");
 
-        bytes32 interactionId = keccak256(abi.encodePacked(_user, _serviceId));
-        require(interactionState[interactionId] == 1, "Invalid state");
+        bytes32 messageHash = _getMessageHash(_user, _serviceId, "Feedback Filling");
+        bytes32 ethSignedMessageHash = _getEthSignedMessageHash(messageHash);
+        (bytes32 r, bytes32 s, uint8 v) = _splitSignature(_feedbackFillingSignature);
 
-        return (recoverSigner(interactionEthSignedHash[interactionId], interactionSignature[interactionId]) == _user);
+        return _recoverSigner(ethSignedMessageHash, v, r, s) == _user;
     }
 
+    // Submit feedback for a recorded interaction.
     function submitFeedback(
         address _user,
         uint256 _serviceId,
         bytes memory _feedbackFillingSignature,
-        string memory _feedback
-    ) public {
-        require(verifyFeedbackFilling(_user, _serviceId, _feedbackFillingSignature), "User signature not verified");
+        uint256 _feedback_p1,
+        uint256 _feedback_p2
+    ) external {
+        require(verifyFeedbackFilling(_user, _serviceId, _feedbackFillingSignature), "Invalid signature");
 
-        bytes32 interactionId = keccak256(abi.encodePacked(_user, _serviceId));
-        interactionState[interactionId] = 2;
-        interactionToFeedback[interactionId] = _feedback;
+        bytes32 interactionId = _getInteractionId(_user, _serviceId);
+        interactions[interactionId].state = 2;
+        feedback[interactionId] = [_feedback_p1, _feedback_p2];
     }
 
-    function getTotalInteractions(uint256 _serviceId) public view returns (uint256) {
-        return serviceToInteractions[_serviceId].length;
+    // Get the total number of interactions for a service.
+    function getTotalInteractions(uint256 _serviceId) external view returns (uint256) {
+        return serviceInteractions[_serviceId].length;
     }
 
+    // Get the total number of feedbacks provided for a service.
     function getTotalFeedbacks(uint256 _serviceId) public view returns (uint256) {
         uint256 totalFeedbacks = 0;
-        for (uint256 i = 0; i < serviceToInteractions[_serviceId].length; i++) {
-            uint8 state = interactionState[serviceToInteractions[_serviceId][i]];
-            if(state == 2) {
+        bytes32[] memory interactionsArray = serviceInteractions[_serviceId];
+        for (uint256 i = 0; i < interactionsArray.length; i++) {
+            if (interactions[interactionsArray[i]].state == 2) {
                 totalFeedbacks++;
             }
         }
         return totalFeedbacks;
     }
 
-    function rewardUsersForFeedback(uint256 _serviceId, uint256 _rewardAmount) public payable {
-        uint totalFeedbacks = getTotalFeedbacks(_serviceId);
+    // Reward users who provided feedback.
+    function rewardUsersForFeedback(uint256 _serviceId, uint256 _rewardAmount) external payable {
+        uint256 totalFeedbacks = getTotalFeedbacks(_serviceId);
         require(msg.value >= _rewardAmount * totalFeedbacks, "Insufficient funds");
 
-        address[] memory users = new address[](totalFeedbacks);
-        uint256 count = 0;
-        for (uint256 i = 0; i < serviceToInteractions[_serviceId].length; i++) {
-            uint8 state = interactionState[serviceToInteractions[_serviceId][i]];
-            if(state == 2) {
-                users[count] = recoverSigner(interactionEthSignedHash[serviceToInteractions[_serviceId][i]], interactionSignature[serviceToInteractions[_serviceId][i]]);
-                count++;
+        bytes32[] memory interactionsArray = serviceInteractions[_serviceId];
+        uint256 paid = 0;
+
+        for (uint256 i = 0; i < interactionsArray.length; i++) {
+            if (interactions[interactionsArray[i]].state == 2) {
+                address user = interactions[interactionsArray[i]].user;
+                payable(user).transfer(_rewardAmount);
+                paid++;
             }
         }
-
-        for (uint256 i = 0; i < users.length; i++) {
-            address user = users[i];
-            payable(user).transfer(_rewardAmount);
-        }
+        require(paid == totalFeedbacks, "Partial payment issue");
     }
 
-    function getServiceIdsByOwner(address _owner) public view returns (uint256[] memory) {
-        return ownerToServiceIds[_owner];
+    // Retrieve metadata for a specific service.
+    function getServiceMetadata(uint256 _serviceId) external view returns (uint256, uint256) {
+        Service storage service = services[_serviceId];
+        return (service.metadata_p1, service.metadata_p2);
     }
 
-    function getServiceMetadataByServiceId(uint256 _serviceId) public view returns (string memory) {
-        return serviceMetadata[_serviceId];
-    }
-
-    function getFeedbackByService(uint256 _serviceId) public view returns (string[] memory) {
+    // Retrieve feedback data for a specific service.
+    function getFeedback(uint256 _serviceId) external view returns (uint256[] memory) {
         uint256 totalFeedbacks = getTotalFeedbacks(_serviceId);
-        string[] memory feedbacks = new string[](totalFeedbacks);
+        uint256[] memory feedbacks = new uint256[](2 * totalFeedbacks);
         uint256 count = 0;
-        for (uint256 i = 0; i < serviceToInteractions[_serviceId].length; i++) {
-            uint8 state = interactionState[serviceToInteractions[_serviceId][i]];
-            if(state == 2) {
-                feedbacks[count] = interactionToFeedback[serviceToInteractions[_serviceId][i]];
-                count++;
+
+        bytes32[] memory interactionsArray = serviceInteractions[_serviceId];
+        for (uint256 i = 0; i < interactionsArray.length; i++) {
+            if (interactions[interactionsArray[i]].state == 2) {
+                feedbacks[count++] = feedback[interactionsArray[i]][0];
+                feedbacks[count++] = feedback[interactionsArray[i]][1];
             }
         }
 
         return feedbacks;
     }
 
-    function getMessageHash(
+    // Utility functions
+    function _getInteractionId(address _user, uint256 _serviceId) private pure returns (bytes32) {
+        return keccak256(abi.encodePacked(_user, _serviceId));
+    }
+
+    function _getMessageHash(
         address _user,
         uint256 _serviceId,
         string memory _state
-    ) public pure returns (bytes32) {
+    ) private pure returns (bytes32) {
         return keccak256(abi.encodePacked(_user, _serviceId, _state));
     }
 
-    function verify(
-        address _user,
-        uint256 _serviceId,
-        string memory _state,
-        bytes memory _signature
-    ) public pure returns (bool) {
-        bytes32 messageHash = getMessageHash(_user, _serviceId, _state);
-        bytes32 ethSignedMessageHash = getEthSignedMessageHash(messageHash);
-
-        return recoverSigner(ethSignedMessageHash, _signature) == _user;
-    }
-
-    function getEthSignedMessageHash(bytes32 _messageHash)
-        internal
-        pure
-        returns (bytes32)
-    {
+    function _getEthSignedMessageHash(bytes32 _messageHash) private pure returns (bytes32) {
         return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", _messageHash));
     }
 
-    function recoverSigner(bytes32 _ethSignedMessageHash, bytes memory _signature)
-        public
+    function _recoverSigner(bytes32 _ethSignedMessageHash, uint8 _v, bytes32 _r, bytes32 _s)
+        private
         pure
         returns (address)
     {
-        (bytes32 r, bytes32 s, uint8 v) = splitSignature(_signature);
-        return ecrecover(_ethSignedMessageHash, v, r, s);
+        return ecrecover(_ethSignedMessageHash, _v, _r, _s);
     }
 
-    function splitSignature(bytes memory sig)
-        internal
+    function _splitSignature(bytes memory sig)
+        private
         pure
         returns (
             bytes32 r,
@@ -176,7 +180,6 @@ contract PrivateFeedback {
         )
     {
         require(sig.length == 65, "Invalid signature length");
-
         assembly {
             r := mload(add(sig, 32))
             s := mload(add(sig, 64))
