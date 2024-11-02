@@ -2,99 +2,207 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
 describe("PrivateFeedback Contract", function () {
-    let privateFeedback, owner, user1, user2;
-    
-    beforeEach(async function () {
+    let PrivateFeedback;
+    let privateFeedback;
+    let owner;
+    let user1;
+    let user2;
+    let serviceId;
+    let interactionId;
+
+    before(async function () {
         [owner, user1, user2] = await ethers.getSigners();
-        const PrivateFeedback = await ethers.getContractFactory("PrivateFeedback");
+        PrivateFeedback = await ethers.getContractFactory("PrivateFeedback");
         privateFeedback = await PrivateFeedback.deploy();
         await privateFeedback.deployed();
     });
 
-    async function getMessageHash(address, serviceId, action) {
-        return await ethers.utils.solidityKeccak256(["address", "uint256", "string"], [address, serviceId, action]);
-    }
+    describe("Service Registration", function () {
+        it("should register a new service", async function () {
+            const tx = await privateFeedback.connect(owner).registerService(12345, 67890);
+            const receipt = await tx.wait();
+            serviceId = receipt.events[0].args.serviceId;
 
-    it("Should register a new service", async function () {
-        const metadata_p1 = ethers.utils.parseUnits("12345", "wei");
-        const metadata_p2 = ethers.utils.parseUnits("67890", "wei");
+            const [metadata_p1, metadata_p2] = await privateFeedback.getServiceMetadata(serviceId);
+            expect(metadata_p1).to.equal(12345);
+            expect(metadata_p2).to.equal(67890);
+        });
 
-        const tx = await privateFeedback.connect(owner).registerService(metadata_p1, metadata_p2);
-        const receipt = await tx.wait();
-
-        expect(receipt.events[0].args.owner).to.equal(owner.address);
-        expect(receipt.events[0].args.serviceId).to.equal(1);
+        it("should emit ServiceRegistered event", async function () {
+            await expect(privateFeedback.connect(owner).registerService(12345, 67890))
+                .to.emit(privateFeedback, "ServiceRegistered")
+                .withArgs(owner.address, serviceId.add(1));
+        });
     });
 
-    it("Should record an interaction", async function () {
-        const metadata_p1 = 12345;
-        const metadata_p2 = 67890;
-        await privateFeedback.connect(owner).registerService(metadata_p1, metadata_p2);
+    describe("Interaction Registration", function () {
+        before(async function () {
+            interactionId = ethers.utils.keccak256(
+                ethers.utils.defaultAbiCoder.encode(["address", "uint256"], [user1.address, serviceId])
+            );
+        });
 
-        // Create a message and sign it
-        const messageHash = await getMessageHash(user1.address, 1, "Record Interaction");
-        const signature = await user1.signMessage(ethers.utils.arrayify(messageHash));
-        const { v, r, s } = ethers.utils.splitSignature(signature);
+        it("should register an interaction with valid signature using signTypedData", async function () {
+            const interaction = {
+                user: user1.address,
+                serviceId: serviceId,
+                state: 1 // RECORDED
+            };
 
-        await expect(privateFeedback.connect(user1).registerInteraction(1, v, r, s))
-            .to.not.be.reverted;
+            const domain = {
+                name: "PrivateFeedback",
+                version: "1",
+                chainId: await user1.getChainId(),
+                verifyingContract: privateFeedback.address
+            };
+
+            const types = {
+                Interaction: [
+                    { name: "user", type: "address" },
+                    { name: "serviceId", type: "uint256" },
+                    { name: "state", type: "uint8" }
+                ]
+            };
+
+            const signature = await user1._signTypedData(domain, types, interaction);
+            const { v, r, s } = ethers.utils.splitSignature(signature);
+
+            await privateFeedback.connect(user1).registerInteraction(serviceId, v, r, s);
+
+            // Verify interaction via public functions
+            const totalInteractions = await privateFeedback.getTotalInteractions(serviceId);
+            expect(totalInteractions).to.equal(1);
+        });
+
+        it("should revert if the interaction is already registered", async function () {
+            const interaction = {
+                user: user1.address,
+                serviceId: serviceId,
+                state: 1 // RECORDED
+            };
+
+            const domain = {
+                name: "PrivateFeedback",
+                version: "1",
+                chainId: await user1.getChainId(),
+                verifyingContract: privateFeedback.address
+            };
+
+            const types = {
+                Interaction: [
+                    { name: "user", type: "address" },
+                    { name: "serviceId", type: "uint256" },
+                    { name: "state", type: "uint8" }
+                ]
+            };
+
+            const signature = await user1._signTypedData(domain, types, interaction);
+            const { v, r, s } = ethers.utils.splitSignature(signature);
+
+            await expect(
+                privateFeedback.connect(user1).registerInteraction(serviceId, v, r, s)
+            ).to.be.revertedWith("Interaction already registered");
+        });
     });
 
-    it("Should allow verified feedback filling", async function () {
-        await privateFeedback.connect(owner).registerService(12345, 67890);
+    describe("Feedback Verification and Submission", function () {
+        it("should verify feedback eligibility with valid signature", async function () {
+            const feedbackInteraction = {
+                user: user1.address,
+                serviceId: serviceId,
+                state: 2 // FEEDBACK_GIVEN
+            };
 
-        // Register interaction
-        const messageHash = await getMessageHash(user1.address, 1, "Record Interaction");
-        const signature = await user1.signMessage(ethers.utils.arrayify(messageHash));
-        const { v, r, s } = ethers.utils.splitSignature(signature);
-        await privateFeedback.connect(user1).registerInteraction(1, v, r, s);
+            const domain = {
+                name: "PrivateFeedback",
+                version: "1",
+                chainId: await user1.getChainId(),
+                verifyingContract: privateFeedback.address
+            };
 
-        // Verify feedback filling
-        const feedbackMessageHash = await getMessageHash(user1.address, 1, "Feedback Filling");
-        const feedbackSignature = await user1.signMessage(ethers.utils.arrayify(feedbackMessageHash));
-        const isVerified = await privateFeedback.verifyFeedbackFilling(user1.address, 1, feedbackSignature);
+            const types = {
+                Interaction: [
+                    { name: "user", type: "address" },
+                    { name: "serviceId", type: "uint256" },
+                    { name: "state", type: "uint8" }
+                ]
+            };
 
-        expect(isVerified).to.equal(true);
+            const signature = await user1._signTypedData(domain, types, feedbackInteraction);
+            const { v, r, s } = ethers.utils.splitSignature(signature);
+
+            const verified = await privateFeedback.verifyFeedbackFilling(user1.address, serviceId, v, r, s);
+            expect(verified).to.equal(true);
+        });
+
+        it("should submit feedback for an interaction", async function () {
+            const feedbackInteraction = {
+                user: user1.address,
+                serviceId: serviceId,
+                state: 2 // FEEDBACK_GIVEN
+            };
+
+            const domain = {
+                name: "PrivateFeedback",
+                version: "1",
+                chainId: await user1.getChainId(),
+                verifyingContract: privateFeedback.address
+            };
+
+            const types = {
+                Interaction: [
+                    { name: "user", type: "address" },
+                    { name: "serviceId", type: "uint256" },
+                    { name: "state", type: "uint8" }
+                ]
+            };
+
+            const signature = await user1._signTypedData(domain, types, feedbackInteraction);
+            const { v, r, s } = ethers.utils.splitSignature(signature);
+
+            await privateFeedback.connect(user1).submitFeedback(serviceId, v, r, s, 100, 200);
+
+            // Verify feedback via public functions
+            const totalFeedbacks = await privateFeedback.getTotalFeedbacks(serviceId);
+            expect(totalFeedbacks).to.equal(1);
+
+            const feedback = await privateFeedback.getFeedback(serviceId);
+            expect(feedback[0]).to.equal(100);
+            expect(feedback[1]).to.equal(200);
+        });
     });
 
-    it("Should submit feedback after verification", async function () {
-        await privateFeedback.connect(owner).registerService(12345, 67890);
+    describe("Interaction and Feedback Retrieval", function () {
+        it("should retrieve total interactions for a service", async function () {
+            const totalInteractions = await privateFeedback.getTotalInteractions(serviceId);
+            expect(totalInteractions).to.equal(1);
+        });
 
-        // Register interaction
-        const messageHash = await getMessageHash(user1.address, 1, "Record Interaction");
-        const signature = await user1.signMessage(ethers.utils.arrayify(messageHash));
-        const { v, r, s } = ethers.utils.splitSignature(signature);
-        await privateFeedback.connect(user1).registerInteraction(1, v, r, s);
+        it("should retrieve total feedbacks for a service", async function () {
+            const totalFeedbacks = await privateFeedback.getTotalFeedbacks(serviceId);
+            expect(totalFeedbacks).to.equal(1);
+        });
 
-        // Verify and submit feedback
-        const feedbackMessageHash = await getMessageHash(user1.address, 1, "Feedback Filling");
-        const feedbackSignature = await user1.signMessage(ethers.utils.arrayify(feedbackMessageHash));
-        await privateFeedback.connect(owner).submitFeedback(user1.address, 1, feedbackSignature, 1122, 3344);
-
-        const feedback = await privateFeedback.getFeedback(1);
-        expect(feedback[0]).to.equal(1122);
-        expect(feedback[1]).to.equal(3344);
+        it("should retrieve feedback data for a service", async function () {
+            const feedbacks = await privateFeedback.getFeedback(serviceId);
+            expect(feedbacks[0]).to.equal(100);
+            expect(feedbacks[1]).to.equal(200);
+        });
     });
 
-    it("Should reward users with feedback", async function () {
-        await privateFeedback.connect(owner).registerService(12345, 67890);
+    describe("Reward Users for Feedback", function () {
+        it("should reward users for feedback", async function () {
+            const rewardAmount = ethers.utils.parseEther("0.1");
+            await expect(
+                privateFeedback.connect(owner).rewardUsersForFeedback(serviceId, rewardAmount, { value: rewardAmount })
+            ).to.changeEtherBalances([user1], [rewardAmount]);
+        });
 
-        // Register interaction and feedback
-        const messageHash = await getMessageHash(user1.address, 1, "Record Interaction");
-        const signature = await user1.signMessage(ethers.utils.arrayify(messageHash));
-        const { v, r, s } = ethers.utils.splitSignature(signature);
-        await privateFeedback.connect(user1).registerInteraction(1, v, r, s);
-
-        const feedbackMessageHash = await getMessageHash(user1.address, 1, "Feedback Filling");
-        const feedbackSignature = await user1.signMessage(ethers.utils.arrayify(feedbackMessageHash));
-        await privateFeedback.connect(owner).submitFeedback(user1.address, 1, feedbackSignature, 1122, 3344);
-
-        const rewardAmount = ethers.utils.parseEther("0.01");
-        const initialBalance = await user1.getBalance();
-
-        await privateFeedback.connect(owner).rewardUsersForFeedback(1, rewardAmount, { value: rewardAmount });
-        const finalBalance = await user1.getBalance();
-
-        expect(finalBalance.sub(initialBalance)).to.equal(rewardAmount);
+        it("should revert if insufficient funds are provided", async function () {
+            const rewardAmount = ethers.utils.parseEther("1"); // Deliberately high to trigger revert
+            await expect(
+                privateFeedback.connect(owner).rewardUsersForFeedback(serviceId, rewardAmount, { value: ethers.utils.parseEther("0.1") })
+            ).to.be.revertedWith("Insufficient funds");
+        });
     });
 });
