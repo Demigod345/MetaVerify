@@ -109,6 +109,24 @@ contract PrivateFeedback {
         feedback[interactionId] = [_feedback_p1, _feedback_p2];
     }
 
+    function getServiceIdsByOwner(address _owner) public view returns (uint[] memory) {
+        uint256 count = 0;
+        for (uint i = 0; i < serviceIdCounter; i++) {
+            if (services[i].owner == _owner) {
+                count++;
+            }
+        }
+        uint[] memory serviceIds = new uint[](count);
+        count = 0;
+        for (uint i = 0; i < serviceIdCounter; i++) {
+            if (services[i].owner == _owner) {
+                serviceIds[count] = i;
+                count++;
+            }
+        }
+        return serviceIds;
+    }
+
     // Get the total number of interactions for a service.
     function getTotalInteractions(uint256 _serviceId) external view returns (uint256) {
         return serviceInteractions[_serviceId].length;
@@ -151,7 +169,7 @@ contract PrivateFeedback {
     }
 
     // Retrieve feedback data for a specific service.
-    function getFeedback(uint256 _serviceId) external view returns (uint256[] memory) {
+    function getAllFeedbacks(uint256 _serviceId) external view returns (uint256[] memory) {
         uint256 totalFeedbacks = getTotalFeedbacks(_serviceId);
         uint256[] memory feedbacks = new uint256[](2 * totalFeedbacks);
         uint256 count = 0;
